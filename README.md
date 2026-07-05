@@ -10,6 +10,7 @@ A remote MCP server that gives Claude access to your Canvas LMS course materials
 - `list_course_folders` — folder structure in a course
 - `list_folder_files` — files within a specific folder
 - `get_file_metadata` — metadata + fresh download URL for a specific file
+- `get_file_content` — downloads a file and extracts its readable text (PDF, DOCX, PPTX, plain text/markdown/CSV). Use this to actually read lecture slides/notes — Claude can't otherwise reach Canvas's file URLs directly.
 
 **Course site content:**
 - `list_course_modules` — modules and their items (files, pages, assignments)
@@ -32,7 +33,7 @@ A remote MCP server that gives Claude access to your Canvas LMS course materials
 
 > **Note on quiz questions:** Canvas only exposes actual quiz question content while you have an active, in-progress attempt (and even then, only for certain quiz types). `get_quiz` returns the quiz's description/instructions rather than the questions themselves — this is a Canvas API limitation, not something the server withholds.
 
-All Canvas HTML content (pages, announcements, assignment descriptions, discussions, quiz instructions) is converted to plain readable text before being returned.
+All Canvas HTML content (pages, announcements, assignment descriptions, discussions, quiz instructions) is converted to plain readable text before being returned. `get_file_content` caps downloads at 20MB and truncates extracted text past ~60,000 characters (with a note) to keep responses manageable.
 
 ## 1. Get your Canvas credentials
 

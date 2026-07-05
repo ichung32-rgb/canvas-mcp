@@ -5,6 +5,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { convert as htmlToText } from "html-to-text";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import mammoth from "mammoth";
+import AdmZip from "adm-zip";
 
 const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL; // e.g. https://canvas.upenn.edu
 const CANVAS_API_TOKEN = process.env.CANVAS_API_TOKEN; // Canvas personal access token
@@ -60,6 +63,49 @@ function toReadableText(html) {
       { selector: "img", format: "skip" },
     ],
   }).trim();
+}
+
+const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20MB safety cap on downloads
+const MAX_TEXT_CHARS = 60000; // cap extracted text so responses stay manageable
+
+async function fetchFileBuffer(url) {
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${CANVAS_API_TOKEN}` } });
+  if (!res.ok) {
+    throw new Error(`Failed to download file: ${res.status} ${res.statusText}`);
+  }
+  const arrayBuffer = await res.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+async function extractPdfText(buffer) {
+  const data = new Uint8Array(buffer);
+  const doc = await getDocument({ data, useSystemFonts: true }).promise;
+  let fullText = "";
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    const pageText = content.items.map((item) => item.str).join(" ");
+    fullText += `${pageText}\n`;
+  }
+  return fullText.trim();
+}
+
+function extractPptxText(buffer) {
+  const zip = new AdmZip(buffer);
+  const slideEntries = zip
+    .getEntries()
+    .filter((e) => /^ppt\/slides\/slide\d+\.xml$/.test(e.entryName))
+    .sort((a, b) => {
+      const na = parseInt(a.entryName.match(/(\d+)/)[1], 10);
+      const nb = parseInt(b.entryName.match(/(\d+)/)[1], 10);
+      return na - nb;
+    });
+  const slides = slideEntries.map((entry, idx) => {
+    const xml = entry.getData().toString("utf8");
+    const texts = [...xml.matchAll(/<a:t>([^<]*)<\/a:t>/g)].map((m) => m[1]);
+    return `--- Slide ${idx + 1} ---\n${texts.join(" ")}`;
+  });
+  return slides.join("\n\n");
 }
 
 // ---- Build the MCP server with tools ----
@@ -551,6 +597,77 @@ function buildServer() {
     }
   );
 
+  server.registerTool(
+    "get_file_content",
+    {
+      title: "Get File Content",
+      description:
+        "Download a Canvas file and extract its readable text content. Supports PDF, DOCX, PPTX, and plain text/markdown/CSV files. Use this instead of trying to fetch the file's URL directly — Canvas download links aren't otherwise reachable. Large files are size-capped and long text is truncated.",
+      inputSchema: {
+        file_id: z
+          .union([z.string(), z.number()])
+          .describe("The Canvas file ID (from list_course_files, list_folder_files, or list_course_modules)"),
+      },
+    },
+    async ({ file_id }) => {
+      const meta = await canvasFetch(`/files/${file_id}`);
+      const sizeBytes = meta.size || 0;
+      const filename = meta.display_name || meta.filename || `file_${file_id}`;
+
+      if (sizeBytes > MAX_FILE_BYTES) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `File "${filename}" is ${(sizeBytes / 1024 / 1024).toFixed(1)}MB, which exceeds the ${
+                MAX_FILE_BYTES / 1024 / 1024
+              }MB limit for content extraction. Use get_file_metadata to get a direct download link instead.`,
+            },
+          ],
+        };
+      }
+
+      const contentType = meta["content-type"] || "";
+      const buffer = await fetchFileBuffer(meta.url);
+
+      let text;
+      try {
+        if (contentType.includes("pdf") || /\.pdf$/i.test(filename)) {
+          text = await extractPdfText(buffer);
+        } else if (contentType.includes("wordprocessingml") || /\.docx$/i.test(filename)) {
+          const result = await mammoth.extractRawText({ buffer });
+          text = result.value;
+        } else if (contentType.includes("presentationml") || /\.pptx$/i.test(filename)) {
+          text = extractPptxText(buffer);
+        } else if (contentType.startsWith("text/") || /\.(txt|md|csv|json)$/i.test(filename)) {
+          text = buffer.toString("utf8");
+        } else {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `File "${filename}" has type "${contentType}", which isn't currently supported for text extraction (supported: PDF, DOCX, PPTX, plain text/markdown/CSV). Use get_file_metadata for a direct download link instead.`,
+              },
+            ],
+          };
+        }
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Failed to extract text from "${filename}": ${err.message}` }],
+        };
+      }
+
+      let truncated = false;
+      if (text.length > MAX_TEXT_CHARS) {
+        text = text.slice(0, MAX_TEXT_CHARS);
+        truncated = true;
+      }
+
+      const header = `# ${filename}${truncated ? ` (truncated to ${MAX_TEXT_CHARS} characters)` : ""}\n\n`;
+      return { content: [{ type: "text", text: header + text }] };
+    }
+  );
+
   return server;
 }
 
@@ -561,7 +678,11 @@ app.use(express.json());
 // Log every incoming request so we can see in Render's logs whether calls are
 // actually arriving, and with what path/headers, when debugging connectivity.
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} session=${req.headers["mcp-session-id"] || "none"}`);
+  const method = req.body?.method;
+  const toolName = req.body?.params?.name;
+  console.log(
+    `[${new Date().toISOString()}] ${req.method} ${req.path} session=${req.headers["mcp-session-id"] || "none"} rpc_method=${method || "n/a"}${toolName ? ` tool=${toolName}` : ""}`
+  );
   next();
 });
 
