@@ -42,10 +42,14 @@ async function canvasFetch(path, { params } = {}) {
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    console.error(`Canvas API error ${res.status} ${res.statusText} for ${url.pathname}: ${body.slice(0, 500)}`);
     throw new Error(`Canvas API error ${res.status} ${res.statusText}: ${body.slice(0, 500)}`);
   }
   return res.json();
 }
+
+process.on("unhandledRejection", (err) => console.error("Unhandled rejection:", err));
+process.on("uncaughtException", (err) => console.error("Uncaught exception:", err));
 
 function toReadableText(html) {
   if (!html) return "";
@@ -553,6 +557,13 @@ function buildServer() {
 // ---- Express app with streamable HTTP transport (stateful sessions) ----
 const app = express();
 app.use(express.json());
+
+// Log every incoming request so we can see in Render's logs whether calls are
+// actually arriving, and with what path/headers, when debugging connectivity.
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} session=${req.headers["mcp-session-id"] || "none"}`);
+  next();
+});
 
 // Optional shared-secret guard, embedded in the URL PATH (not a header), since
 // Claude's custom connector UI doesn't support setting arbitrary auth headers
