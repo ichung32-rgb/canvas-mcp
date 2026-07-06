@@ -102,10 +102,19 @@ function extractPptxText(buffer) {
     });
   const slides = slideEntries.map((entry, idx) => {
     const xml = entry.getData().toString("utf8");
-    const texts = [...xml.matchAll(/<a:t>([^<]*)<\/a:t>/g)].map((m) => m[1]);
+    const texts = [...xml.matchAll(/<a:t>([^<]*)<\/a:t>/g)].map((m) => decodeXmlEntities(m[1]));
     return `--- Slide ${idx + 1} ---\n${texts.join(" ")}`;
   });
   return slides.join("\n\n");
+}
+
+function decodeXmlEntities(str) {
+  return str
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
 }
 
 // ---- Build the MCP server with tools ----
